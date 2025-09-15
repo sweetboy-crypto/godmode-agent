@@ -218,12 +218,14 @@ def hf_check(signal, snapshot):
         return {"ok": True, "confidence": signal.get("confidence_est", 85), "note": f"hf_exception:{e}"}
 
 # ----------------------
-# Telegram send
+# Telegram send (cleaned + full lot table)
 # ----------------------
 def send_telegram(signal, lot_table):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured, skipping send.")
         return False
+
+    # Build main signal text
     text = (
         f"🛡️ GOD MODE SIGNAL\n"
         f"Instrument: {signal['instrument']}\n"
@@ -233,12 +235,26 @@ def send_telegram(signal, lot_table):
         f"TPs: {', '.join(map(str, signal['tps']))}\n"
         f"Reason: {signal['reason']}\n"
         f"Confidence: {signal.get('confidence_check', signal.get('confidence_est'))}%\n\n"
-        f"Lot table (sample): {json.dumps(lot_table)}\n"
+        f"📊 Lot Table:\n"
     )
+
+    # Add $10 micro account (fixed values)
+    text += "💵 $10 Account → 0.01 lots (Risk $1 max)\n\n"
+
+    # Format lot table neatly for all phases
+    for acc_size, phases in lot_table.items():
+        text += f"💰 ${acc_size}\n"
+        for phase, vals in phases.items():
+            text += (f"  • {phase}: {vals['lot_min']:.2f}–{vals['lot_max']:.2f} lots "
+                     f"(Risk ${vals['risk_usd_min']:.0f}–{vals['risk_usd_max']:.0f})\n")
+        text += "\n"
+
+    # Send message to Telegram
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     r = requests.post(url, data=payload, timeout=15)
     return r.status_code == 200
+
 
 # ----------------------
 # Append to CSV log
