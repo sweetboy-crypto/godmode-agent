@@ -331,4 +331,17 @@ def main():
         print("Signal rejected by HF or confidence below threshold. HF:", hf_result)
 
 if __name__ == "__main__":
+    # Force test message (bypass strategy)
+    send_telegram({
+        "instrument": SYMBOL,
+        "direction": "BUY",
+        "entry": 1900,
+        "stop": 1890,
+        "tps": [1950, 1970, 2000],
+        "reason": "Test signal",
+        "confidence_est": 99
+    }, compute_lot_table(10))
+    
+    # Run the real bot
+
     main()
