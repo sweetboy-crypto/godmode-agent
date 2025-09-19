@@ -1,114 +1,136 @@
-import numpy as np
-import pandas as pd
+import datetime
+import statistics
 
+class Strategy:
+    def __init__(self, candles, symbol, account_type="FUNDED"):
+        """
+        candles: dict of timeframe -> OHLCV data
+        symbol: str (e.g., "XAUUSD")
+        account_type: "FUNDED" | "PHASE1" | "PHASE2" | "PERSONAL_10"
+        """
+        self.candles = candles
+        self.symbol = symbol
+        self.account_type = account_type
+        self.now = datetime.datetime.utcnow()
 
-class TradingStrategy:
-    """
-    Tony Iyke A+ Setup Playbook Strategy
-    """
+    def in_session(self):
+        """Filter trades only during London & NY sessions"""
+        hour = self.now.hour
+        # London: 07:00–11:00 UTC, NY: 12:30–16:00 UTC
+        return (7 <= hour < 11) or (12 <= hour < 16)
 
-    def __init__(self, risk_per_trade=0.01):
-        self.risk_per_trade = risk_per_trade
-
-    # -----------------
-    # Utility functions
-    # -----------------
-
-    def identify_directional_bias(self, df):
-        if len(df) < 5:
+    def detect_bos(self, tf="H4"):
+        """Detect Break of Structure (BOS) on higher TF"""
+        data = self.candles.get(tf, [])
+        if len(data) < 5:
             return None
-        highs = df['high'].values[-5:]
-        lows = df['low'].values[-5:]
-        if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
-            return "bullish"
-        elif highs[-1] < highs[-2] and lows[-1] < lows[-2]:
-            return "bearish"
+
+        last = data[-1]
+        prev = data[-2]
+
+        # BOS bullish if close > prev_high
+        if last["close"] > prev["high"]:
+            return "BOS_UP"
+        # BOS bearish if close < prev_low
+        elif last["close"] < prev["low"]:
+            return "BOS_DOWN"
         return None
 
-    def detect_market_structure_shift(self, df, bias):
-        if len(df) < 10 or bias is None:
-            return False
-        recent_high = max(df['high'].values[-5:])
-        recent_low = min(df['low'].values[-5:])
-        close = df['close'].values[-1]
-        if bias == "bullish" and close > recent_high:
-            return True
-        if bias == "bearish" and close < recent_low:
-            return True
-        return False
-
-    def detect_liquidity_zones(self, df):
-        if len(df) < 10:
-            return False
-        highs = df['high'].values[-5:]
-        lows = df['low'].values[-5:]
-        if np.isclose(highs[-1], highs[-2], atol=0.1):
-            return True
-        if np.isclose(lows[-1], lows[-2], atol=0.1):
-            return True
-        return False
-
-    def detect_poi(self, df):
-        if len(df) < 3:
-            return False
-        c1, c2 = df.iloc[-3], df.iloc[-2]
-        body1 = abs(c1['close'] - c1['open'])
-        body2 = abs(c2['close'] - c2['open'])
-        if body1 > 2 * body2:
-            return True
-        if c1['high'] < c2['low'] or c1['low'] > c2['high']:
-            return True
-        return False
-
-    def calculate_confidence(self, db, mss, liq, poi, confirm):
-        score = 0
-        if db:
-            score += 30
-        if mss:
-            score += 20
-        if liq:
-            score += 20
-        if poi:
-            score += 20
-        if confirm:
-            score += 10
-        return min(score, 100)
-
-    # -----------------
-    # Main Trade Signal
-    # -----------------
-
-    def generate_signal(self, df_daily, df_4h, df_1h, symbol, account_balance):
-        db = self.identify_directional_bias(df_daily)
-        mss = self.detect_market_structure_shift(df_4h, db)
-        liq = self.detect_liquidity_zones(df_1h)
-        poi = self.detect_poi(df_4h)
-        confirm = self.detect_market_structure_shift(df_1h, db)
-        confidence = self.calculate_confidence(db, mss, liq, poi, confirm)
-
-        if confidence < 85:
+    def detect_liquidity_grab(self, tf="M15"):
+        """Detect liquidity sweep (wick above/below key level then close opposite)"""
+        data = self.candles.get(tf, [])
+        if len(data) < 5:
             return None
 
-        entry = df_1h['close'].values[-1]
-        atr = np.mean(df_1h['high'].values[-14:] - df_1h['low'].values[-14:])
-        sl = entry - atr if db == "bullish" else entry + atr
-        rr = abs(entry - sl)
-        tp1 = entry + (rr * 3 if db == "bullish" else -rr * 3)
-        tp2 = entry + (rr * 6 if db == "bullish" else -rr * 6)
-        tp3 = entry + (rr * 10 if db == "bullish" else -rr * 10)
+        last = data[-1]
+        prev = data[-2]
 
-        risk_usd = account_balance * self.risk_per_trade
-        lot = round(risk_usd / (rr * 10), 2)
+        # Sweep above high but close below = bearish liquidity grab
+        if last["high"] > prev["high"] and last["close"] < prev["close"]:
+            return "SWEEP_HIGH"
+        # Sweep below low but close above = bullish liquidity grab
+        if last["low"] < prev["low"] and last["close"] > prev["close"]:
+            return "SWEEP_LOW"
+        return None
+
+    def detect_poi(self, tf="H4"):
+        """Detect strong POI (order block / imbalance zone)"""
+        data = self.candles.get(tf, [])
+        if len(data) < 5:
+            return None
+
+        last = data[-1]
+        prev = data[-2]
+
+        # Strong bullish impulsive candle (big body, small wick)
+        if (last["close"] > last["open"]) and ((last["close"] - last["open"]) > 2 * (last["high"] - last["low"]) / 3):
+            return "DEMAND"
+
+        # Strong bearish impulsive candle
+        if (last["close"] < last["open"]) and ((last["open"] - last["close"]) > 2 * (last["high"] - last["low"]) / 3):
+            return "SUPPLY"
+
+        return None
+
+    def calculate_confidence(self):
+        """Confidence score based on confluence"""
+        score = 0
+
+        if self.detect_bos("H4"): score += 30
+        if self.detect_liquidity_grab("M15"): score += 30
+        if self.detect_poi("H4"): score += 25
+        if self.in_session(): score += 15
+
+        return min(score, 100)
+
+    def generate_signal(self):
+        """Generate trade setup if conditions are met"""
+        conf = self.calculate_confidence()
+
+        # Different account risk rules
+        if self.account_type == "PERSONAL_10" and conf < 95:
+            return None
+        elif self.account_type != "PERSONAL_10" and conf < 85:
+            return None
+
+        direction = None
+        bos = self.detect_bos("H4")
+        sweep = self.detect_liquidity_grab("M15")
+        poi = self.detect_poi("H4")
+
+        if bos == "BOS_UP" and sweep in ["SWEEP_LOW", None] and poi == "DEMAND":
+            direction = "BUY"
+        elif bos == "BOS_DOWN" and sweep in ["SWEEP_HIGH", None] and poi == "SUPPLY":
+            direction = "SELL"
+        else:
+            return None
+
+        # Example: last M15 candle for entry
+        ref = self.candles["M15"][-1]
+        entry = ref["close"]
+
+        # SL at candle high/low
+        if direction == "BUY":
+            sl = ref["low"]
+        else:
+            sl = ref["high"]
+
+        risk = abs(entry - sl)
+
+        # TP targets with fixed RR
+        tp1 = entry + (risk * 3) if direction == "BUY" else entry - (risk * 3)
+        tp2 = entry + (risk * 6) if direction == "BUY" else entry - (risk * 6)
+        tp3 = entry + (risk * 10) if direction == "BUY" else entry - (risk * 10)
 
         return {
-            "pair": symbol,
-            "bias": db,
-            "entry": float(entry),
-            "sl": float(sl),
-            "tp1": float(tp1),
-            "tp2": float(tp2),
-            "tp3": float(tp3),
-            "lot": lot,
-            "confidence": confidence,
-            "status": "new"
+            "symbol": self.symbol,
+            "direction": direction,
+            "entry": round(entry, 3),
+            "sl": round(sl, 3),
+            "tp1": round(tp1, 3),
+            "tp2": round(tp2, 3),
+            "tp3": round(tp3, 3),
+            "confidence": conf,
+            "time": self.now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "account_type": self.account_type
         }
