@@ -1,89 +1,78 @@
 import os
 import requests
-from datetime import datetime, timezone
+import pandas as pd
+from datetime import datetime
 from strategy import generate_signal
 
-# -------------------------------
-# Config
-# -------------------------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+# Get API key from GitHub Secrets
+API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
-# Symbols to scan
-WATCHLIST = ["XAU/USD", "GBPUSD", "EURUSD", "USDJPY", "NAS100"]
+# ✅ Use correct TwelveData symbols
+symbols = ["XAU/USD", "GBP/USD", "EUR/USD", "USD/JPY", "NDX"]
 
-ACCOUNT_TYPES = ["PERSONAL_10", "PROP_PHASE1", "PROP_PHASE2", "FUNDED"]
+# CSV file to save signals
+SIGNAL_FILE = "signals.csv"
 
-# -------------------------------
-# Utilities
-# -------------------------------
-def fetch_candles(symbol: str, interval: str = "15min", outputsize: int = 50):
+
+def fetch_candles(symbol, interval="15min", outputsize=200):
     """
-    Fetch historical candles from TwelveData.
+    Fetch recent OHLCV candles from TwelveData.
     """
-    url = f"https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "apikey": TWELVEDATA_API_KEY,
-        "outputsize": outputsize,
-    }
-    r = requests.get(url, params=params)
-    data = r.json()
+    url = (
+        f"https://api.twelvedata.com/time_series"
+        f"?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={API_KEY}"
+    )
+    try:
+        response = requests.get(url)
+        data = response.json()
 
-    if "values" not in data:
-        print(f"Error fetching data for {symbol}: {data}")
-        return []
+        if "values" not in data:
+            print(f"❌ Error fetching {symbol}: {data}")
+            return None
 
-    return data["values"]
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+
+        print(f"✅ {symbol} → fetched {len(df)} candles ({interval})")
+        return df
+
+    except Exception as e:
+        print(f"⚠️ Exception fetching {symbol}: {e}")
+        return None
 
 
-def send_telegram_message(text: str):
+def save_signal(signal):
     """
-    Send a message to Telegram channel.
+    Save signal to CSV file.
     """
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    new_entry = pd.DataFrame([signal])
+    if os.path.exists(SIGNAL_FILE):
+        df = pd.read_csv(SIGNAL_FILE)
+        df = pd.concat([df, new_entry], ignore_index=True)
+    else:
+        df = new_entry
+    df.to_csv(SIGNAL_FILE, index=False)
+    print(f"💾 Saved signal: {signal['pair']} @ {signal['entry']}")
 
 
-# -------------------------------
-# Trading Agent Logic
-# -------------------------------
-def run_agent():
+def main():
     """
-    Main loop: fetch data → generate signals → send alerts.
+    Main agent loop: fetch data, run strategy, save signal.
     """
-    for symbol in WATCHLIST:
-        candles = fetch_candles(symbol)
-        if not candles:
+    for symbol in symbols:
+        df = fetch_candles(symbol, interval="15min", outputsize=200)
+        if df is None:
             continue
 
-        for account in ACCOUNT_TYPES:
-            signal = generate_signal(candles, account, symbol)
-            if not signal:
-                continue
+        signal = generate_signal(df, symbol)
 
-            # Format Telegram alert
-            message = f"""
-🚨 *TRADE ALERT* 🚨
-Account: {account}
-Pair: {signal['pair']}
-Bias: {signal['bias'].upper()}
-Entry: {signal['entry']}
-SL: {signal['sl']}
-TP1: {signal['tp1']}
-TP2: {signal['tp2']}
-Lot Size: {signal['lot']}
-Confidence: {signal['confidence']}%
-
-⏰ Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-            """
-
-            send_telegram_message(message.strip())
-            print(f"Signal sent for {symbol} [{account}]")
+        if signal:
+            save_signal(signal)
+        else:
+            print(f"ℹ️ No signal for {symbol} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
 
 if __name__ == "__main__":
-    run_agent()
+    main()
