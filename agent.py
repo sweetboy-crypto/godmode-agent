@@ -1,107 +1,161 @@
 import os
+import json
 import requests
-import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from strategy import TradingStrategy
 
-# Load secrets
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# --- Load environment secrets ---
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD", "NAS100", "BTC/USD"]
+# --- File for trade persistence ---
+SIGNALS_FILE = "signals.json"
 
-# Active trades memory
-ACTIVE_TRADES = {}
-
-def fetch_data(symbol, interval, outputsize=100):
-    url = f"https://api.twelvedata.com/time_series"
-    params = {"symbol": symbol, "interval": interval, "apikey": TWELVEDATA_API_KEY, "outputsize": outputsize}
-    r = requests.get(url, params=params)
-    data = r.json()
-    if "values" not in data:
-        print(f"Error fetching {symbol}: {data}")
-        return None
-    df = pd.DataFrame(data["values"])
-    df = df.rename(columns={"datetime": "date"})
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-    df = df[::-1].reset_index(drop=True)
-    return df
-
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# --- Helper: Telegram Alert ---
+def send_telegram_message(message: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    requests.post(url, data=payload)
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
 
-def check_trade_updates(symbol, signal, current_price):
-    """
-    Manage trade updates (BE, partials, trailing, exit)
-    """
-    entry, sl, tp1, tp2, tp3 = signal["entry"], signal["sl"], signal["tp1"], signal["tp2"], signal["tp3"]
-    bias = signal["bias"]
-    trade_id = f"{symbol}_{entry}"
+# --- Helper: Load/Save signals ---
+def load_signals():
+    if not os.path.exists(SIGNALS_FILE):
+        return []
+    with open(SIGNALS_FILE, "r") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
 
-    if trade_id not in ACTIVE_TRADES:
-        ACTIVE_TRADES[trade_id] = {"status": "active", "last_update": None}
+def save_signals(signals):
+    with open(SIGNALS_FILE, "w") as f:
+        json.dump(signals, f, indent=2)
 
-    # Halfway to TP1 → Move SL to BE
-    if signal["status"] == "new" and ((bias == "bullish" and current_price >= (entry + (tp1 - entry)/2)) or (bias == "bearish" and current_price <= (entry - (entry - tp1)/2))):
-        send_telegram(f"⚡ {symbol}: Price halfway to TP1 → Move SL to BE")
-        signal["status"] = "BE"
+# --- Fetch live OHLCV data ---
+def fetch_market_data(symbol, interval="1h", outputsize=200):
+    url = f"https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVEDATA_API_KEY,
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    if "values" not in data:
+        print(f"Error fetching data for {symbol}: {data}")
+        return None
+    return data["values"][::-1]  # oldest → newest
 
-    # TP1 Hit → Take partials
-    if current_price >= tp1 if bias == "bullish" else current_price <= tp1:
-        send_telegram(f"✅ {symbol}: TP1 hit → Take partials")
-        signal["status"] = "TP1"
-
-    # Halfway to TP2 → Trail SL
-    if signal["status"] == "TP1" and ((bias == "bullish" and current_price >= (tp1 + (tp2 - tp1)/2)) or (bias == "bearish" and current_price <= (tp1 - (tp1 - tp2)/2))):
-        send_telegram(f"⚡ {symbol}: Halfway to TP2 → Trail SL")
-        signal["status"] = "trail"
-
-    # TP2 Hit
-    if current_price >= tp2 if bias == "bullish" else current_price <= tp2:
-        send_telegram(f"✅ {symbol}: TP2 hit → Lock more profits, hold for TP3")
-        signal["status"] = "TP2"
-
-    # TP3 Hit
-    if current_price >= tp3 if bias == "bullish" else current_price <= tp3:
-        send_telegram(f"🏆 {symbol}: TP3 hit → Close remaining position")
-        signal["status"] = "TP3"
-
-    # Reversal (price back to entry after TP1)
-    if signal["status"] in ["TP1", "trail"] and ((bias == "bullish" and current_price < entry) or (bias == "bearish" and current_price > entry)):
-        send_telegram(f"⚠️ {symbol}: Market reversal → Exit trade!")
-        signal["status"] = "exit"
-
+# --- Main Bot Execution ---
 def main():
     strategy = TradingStrategy()
-    account_balance = 10000
 
-    for symbol in SYMBOLS:
-        df_daily = fetch_data(symbol, "1day")
-        df_4h = fetch_data(symbol, "4h")
-        df_1h = fetch_data(symbol, "1h")
-        if df_daily is None or df_4h is None or df_1h is None:
+    # Symbols to monitor
+    symbols = ["XAU/USD", "GBPUSD", "EURUSD", "USDJPY", "NAS100"]
+
+    signals = load_signals()
+    active_signals = []
+
+    for symbol in symbols:
+        data = fetch_market_data(symbol)
+        if not data:
             continue
 
-        signal = strategy.generate_signal(df_daily, df_4h, df_1h, symbol, account_balance)
+        # Run strategy logic
+        signal = strategy.find_signal(symbol, data)
+
         if signal:
-            msg = (
-                f"📊 *A+ Setup Found!*\n\n"
-                f"Pair: {signal['pair']}\n"
-                f"Bias: {signal['bias'].upper()}\n"
+            # Build trade message
+            message = (
+                f"*NEW TRADE SIGNAL*\n"
+                f"Pair: {symbol}\n"
                 f"Entry: {signal['entry']}\n"
                 f"SL: {signal['sl']}\n"
-                f"TP1: {signal['tp1']}\n"
-                f"TP2: {signal['tp2']}\n"
-                f"TP3: {signal['tp3']}\n"
-                f"Lot: {signal['lot']}\n"
+                f"TP1 (1:3): {signal['tp1']}\n"
+                f"TP2 (1:6): {signal['tp2']}\n"
+                f"TP3 (1:10): {signal['tp3']}\n"
+                f"Lot: {signal['lot_size']}\n"
                 f"Confidence: {signal['confidence']}%\n\n"
-                f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
             )
-            send_telegram(msg)
+            send_telegram_message(message)
 
-            # Monitor live price
-            current_price = df_1h['close'].values[-1]
-            check_trade_updates(symbol, signal, current_price)
+            # Save signal for monitoring
+            signals.append(signal)
+
+    # --- Manage Active Trades ---
+    for signal in signals:
+        # Fetch current price
+        mkt = fetch_market_data(signal["symbol"], interval="1min", outputsize=5)
+        if not mkt:
+            continue
+        current_price = float(mkt[-1]["close"])
+
+        entry = float(signal["entry"])
+        sl = float(signal["sl"])
+        tp1 = float(signal["tp1"])
+        tp2 = float(signal["tp2"])
+        tp3 = float(signal["tp3"])
+
+        # LONG trade monitoring
+        if signal["direction"] == "BUY":
+            # Breakeven alert
+            if not signal.get("be_moved") and current_price >= entry + (tp1 - entry) / 2:
+                send_telegram_message(f"[BE ALERT] {signal['symbol']} move SL → {entry}")
+                signal["be_moved"] = True
+
+            # TP1 hit
+            if not signal.get("tp1_hit") and current_price >= tp1:
+                send_telegram_message(f"[TP1 HIT] {signal['symbol']} hit TP1 @ {tp1}. Close 50%.")
+                signal["tp1_hit"] = True
+
+            # Trailing stop before TP2
+            if signal.get("tp1_hit") and not signal.get("trail_active") and current_price >= entry + (tp2 - entry) / 2:
+                send_telegram_message(f"[TRAILING SL] {signal['symbol']} trail SL under structure.")
+                signal["trail_active"] = True
+
+            # TP2 hit
+            if not signal.get("tp2_hit") and current_price >= tp2:
+                send_telegram_message(f"[TP2 HIT] {signal['symbol']} TP2 @ {tp2}. Lock more profits.")
+                signal["tp2_hit"] = True
+
+            # TP3 hit
+            if not signal.get("tp3_hit") and current_price >= tp3:
+                send_telegram_message(f"[TP3 HIT] {signal['symbol']} TP3 @ {tp3}. Full target achieved!")
+                signal["tp3_hit"] = True
+
+        # SHORT trade monitoring
+        elif signal["direction"] == "SELL":
+            if not signal.get("be_moved") and current_price <= entry - (entry - tp1) / 2:
+                send_telegram_message(f"[BE ALERT] {signal['symbol']} move SL → {entry}")
+                signal["be_moved"] = True
+
+            if not signal.get("tp1_hit") and current_price <= tp1:
+                send_telegram_message(f"[TP1 HIT] {signal['symbol']} hit TP1 @ {tp1}. Close 50%.")
+                signal["tp1_hit"] = True
+
+            if signal.get("tp1_hit") and not signal.get("trail_active") and current_price <= entry - (entry - tp2) / 2:
+                send_telegram_message(f"[TRAILING SL] {signal['symbol']} trail SL above structure.")
+                signal["trail_active"] = True
+
+            if not signal.get("tp2_hit") and current_price <= tp2:
+                send_telegram_message(f"[TP2 HIT] {signal['symbol']} TP2 @ {tp2}. Lock more profits.")
+                signal["tp2_hit"] = True
+
+            if not signal.get("tp3_hit") and current_price <= tp3:
+                send_telegram_message(f"[TP3 HIT] {signal['symbol']} TP3 @ {tp3}. Full target achieved!")
+                signal["tp3_hit"] = True
+
+        active_signals.append(signal)
+
+    # Save updated state
+    save_signals(active_signals)
+
+
+if __name__ == "__main__":
+    main()
