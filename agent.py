@@ -1,80 +1,89 @@
 import os
 import requests
-import random
-from datetime import datetime
+from datetime import datetime, timezone
+from strategy import generate_signal
 
-# === Telegram Config ===
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# -------------------------------
+# Config
+# -------------------------------
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 
-# === Account Types ===
-ACCOUNT_TYPES = {
-    "funded_phase1": {"balance": 5000, "risk_per_trade": 0.01, "min_conf": 85},
-    "funded_phase2": {"balance": 5000, "risk_per_trade": 0.01, "min_conf": 85},
-    "funded_live": {"balance": 5000, "risk_per_trade": 0.01, "min_conf": 85},
-    "personal_10": {"balance": 10, "risk_per_trade": 1.0, "min_conf": 95},  # 🔥 only >=95%
-}
+# Symbols to scan
+WATCHLIST = ["XAU/USD", "GBPUSD", "EURUSD", "USDJPY", "NAS100"]
 
-# === Fake Market Analysis (Replace w/ Real Data) ===
-def analyze_market():
-    pairs = ["XAUUSD", "EURUSD", "GBPUSD"]
-    pair = random.choice(pairs)
+ACCOUNT_TYPES = ["PERSONAL_10", "PROP_PHASE1", "PROP_PHASE2", "FUNDED"]
 
-    # Random example setup
-    entry = round(random.uniform(1800, 2000), 2)
-    stop_loss = entry - random.uniform(2, 5)
-    tp1 = entry + (entry - stop_loss) * 5
-    tp2 = entry + (entry - stop_loss) * 10
-    confidence = random.randint(80, 99)  # Random confidence (simulate strategy)
-
-    return {
-        "pair": pair,
-        "entry": entry,
-        "stop_loss": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "confidence": confidence,
+# -------------------------------
+# Utilities
+# -------------------------------
+def fetch_candles(symbol: str, interval: str = "15min", outputsize: int = 50):
+    """
+    Fetch historical candles from TwelveData.
+    """
+    url = f"https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "apikey": TWELVEDATA_API_KEY,
+        "outputsize": outputsize,
     }
+    r = requests.get(url, params=params)
+    data = r.json()
 
-# === Position Sizing ===
-def calculate_lot(balance, risk_per_trade, entry, stop_loss):
-    risk_amount = balance * risk_per_trade
-    stop_distance = abs(entry - stop_loss)
-    if stop_distance == 0:
-        return 0.01
-    lot_size = risk_amount / stop_distance / 10  # simplified gold lot sizing
-    return max(0.01, round(lot_size, 2))
+    if "values" not in data:
+        print(f"Error fetching data for {symbol}: {data}")
+        return []
 
-# === Send to Telegram ===
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    return data["values"]
+
+
+def send_telegram_message(text: str):
+    """
+    Send a message to Telegram channel.
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
-# === Main Trading Bot ===
-def trading_bot():
-    signal = analyze_market()
 
-    for acc_name, acc in ACCOUNT_TYPES.items():
-        if signal["confidence"] < acc["min_conf"]:
-            send_telegram(f"❌ No valid trade for *{acc_name}* today. Confidence {signal['confidence']}% too low.")
+# -------------------------------
+# Trading Agent Logic
+# -------------------------------
+def run_agent():
+    """
+    Main loop: fetch data → generate signals → send alerts.
+    """
+    for symbol in WATCHLIST:
+        candles = fetch_candles(symbol)
+        if not candles:
             continue
 
-        lot_size = calculate_lot(acc["balance"], acc["risk_per_trade"], signal["entry"], signal["stop_loss"])
+        for account in ACCOUNT_TYPES:
+            signal = generate_signal(candles, account, symbol)
+            if not signal:
+                continue
 
-        msg = f"""
-📊 *Trade Alert for {acc_name.upper()}*
+            # Format Telegram alert
+            message = f"""
+🚨 *TRADE ALERT* 🚨
+Account: {account}
 Pair: {signal['pair']}
+Bias: {signal['bias'].upper()}
 Entry: {signal['entry']}
-SL: {signal['stop_loss']}
+SL: {signal['sl']}
 TP1: {signal['tp1']}
 TP2: {signal['tp2']}
-Lot: {lot_size}
-Confidence: *{signal['confidence']}%*
+Lot Size: {signal['lot']}
+Confidence: {signal['confidence']}%
 
-Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
-"""
-        send_telegram(msg)
+⏰ Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+            """
+
+            send_telegram_message(message.strip())
+            print(f"Signal sent for {symbol} [{account}]")
+
 
 if __name__ == "__main__":
-    trading_bot()
+    run_agent()
