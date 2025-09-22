@@ -9,8 +9,8 @@ from strategy import generate_signal
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 SIGNALS_FILE = "signals.json"
 
-SYMBOLS = ["GBPJPY", "GBPUSD", "EURUSD", "USDJPY", "XAU/USD", "BTC/USD", "ETH/USD"]
-ACCOUNT_BALANCE = 25000  # adjust for prop firm
+SYMBOLS = ["GBP/JPY", "GBP/USD", "EUR/USD", "USDJ/PY", "XAU/USD", "BTC/USD", "ETH/USD"]
+ACCOUNT_BALANCE = 5000  # adjust for prop firm
 
 
 # --- Save & Load ---
