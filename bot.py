@@ -1,14 +1,13 @@
 import os
 import requests
 
-def main():
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-    payload = {"chat_id": chat_id, "text": "✅ Trading Bot test: pipeline is working!"}
-    r = requests.post(url, json=payload)
-    print("Telegram response:", r.json())
-
-if __name__ == "__main__":
-    main()
+def send_alert(message: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, data=payload)
+    except Exception as e:
+        print(f"Telegram error: {e}")
