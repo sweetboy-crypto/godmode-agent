@@ -1,56 +1,44 @@
 import os
 import requests
-from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-class TelegramBot:
-    def __init__(self):
-        self.base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    def send_message(self, text: str, parse_mode="Markdown"):
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": parse_mode
-        }
-        try:
-            r = requests.post(self.base_url, data=payload)
-            return r.json()
-        except Exception as e:
-            print(f"[ERROR] Telegram send failed: {e}")
-            return None
+def send_telegram(message: str):
+    """Send message to Telegram bot."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
-    # --- Send trade signal ---
-    def send_trade_signal(self, symbol, timeframe, bias, mss, liquidity, poi, confirm, confidence):
-        time_now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        msg = f"""
-📊 *Trading Signal Alert*  
-━━━━━━━━━━━━━━━  
-**Pair:** {symbol}  
-**Timeframe:** {timeframe}  
-**Bias:** {bias}  
-**MSS/BOS:** {mss if mss else "None"}  
-**Liquidity:** {", ".join([l['type'] for l in liquidity]) if liquidity else "None"}  
-**POI:** {poi['type']} @ {round(poi['level'], 5)} if poi else "None"  
-**Confirmation:** {confirm if confirm else "None"}  
-━━━━━━━━━━━━━━━  
-🔥 *Confidence Score:* {confidence}%  
-⏰ {time_now}  
-        """
-        self.send_message(msg)
+def format_signal(signal: dict):
+    """Format new trade signal alert."""
+    return (
+        f"📊 *NEW TRADE SIGNAL*\n\n"
+        f"Pair: {signal['symbol']}\n"
+        f"Bias: {signal['bias'].upper()}\n"
+        f"Entry: {signal['entry']}\n"
+        f"SL: {signal['sl']}\n"
+        f"TP1: {signal['tp1']}\n"
+        f"TP2: {signal['tp2']}\n"
+        f"Lot Size: {signal['lot']} lots\n\n"
+        f"POI: {signal['poi']}\n"
+        f"Liquidity: {signal['liquidity']}"
+    )
 
-    # --- Send trade management update ---
-    def send_trade_update(self, symbol, status, price):
-        time_now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        msg = f"""
-⚡ *Trade Update*  
-━━━━━━━━━━━━━━━  
-**Pair:** {symbol}  
-**Status:** {status}  
-**Price:** {price}  
-⏰ {time_now}  
-        """
-        self.send_message(msg)
+
+def format_update(signal: dict, update_type: str):
+    """Format trade management updates."""
+    if update_type == "BE":
+        return f"🔒 [RISK UPDATE]\n{signal['symbol']} → Move SL to BE ({signal['entry']})"
+    elif update_type == "TP1":
+        return f"✅ [PARTIAL PROFIT]\n{signal['symbol']} TP1 Hit @ {signal['tp1']}"
+    elif update_type == "TP2":
+        return f"🏆 [FULL TP]\n{signal['symbol']} TP2 Hit @ {signal['tp2']}"
+    elif update_type == "EXIT":
+        return f"⚠️ [MARKET REVERSAL]\nExit {signal['symbol']} immediately!"
+    return None
