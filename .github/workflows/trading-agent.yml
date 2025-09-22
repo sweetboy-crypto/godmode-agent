@@ -2,40 +2,23 @@ name: Trading Agent
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"   # runs every 5 minutes
   workflow_dispatch:
-
-permissions:
-  contents: write   # ✅ allows committing signals.json updates
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
+      - uses: actions/checkout@v3
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
-
+          python-version: '3.10'
       - name: Install dependencies
-        run: pip install requests pandas numpy
-
-      - name: Run trading agent
+        run: pip install pandas requests
+      - name: Run agent
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python agent.py
-
-      - name: Commit updated signals.json
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "action@github.com"
-          git add signals.json
-          git commit -m "Update signals.json" || echo "No changes"
-          git push
