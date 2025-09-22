@@ -13,9 +13,9 @@ def calculate_lot_size(balance_usd, sl_pips, symbol):
     pip_value = 10  # Default USD pairs
     if "JPY" in symbol:
         pip_value = 6.62
-    elif symbol in ["XAUUSD", "XAGUSD"]:
+    elif symbol in ["XAU/USD", "XAG/USD"]:
         pip_value = 10
-    elif symbol in ["BTCUSD", "ETHUSD"]:
+    elif symbol in ["BTC/USD", "ETH/USD"]:
         pip_value = 1  # Approx, depends on broker
 
     lot_size = risk_amount / (pip_value * sl_pips)
