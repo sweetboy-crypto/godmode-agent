@@ -20,18 +20,51 @@ def save_signals(signals):
 
 
 # --- Data Fetch ---
-def fetch_ohlcv(symbol, interval="15min", length=50):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={length}&apikey={TWELVEDATA_API_KEY}"
-    r = requests.get(url, timeout=10).json()
+def fetch_ohlcv(symbol: str, interval="15min", length=100):
+    """Fetch OHLCV data from TwelveData with retries and error handling."""
+    # Automatically fix symbol format (e.g. GBPUSD → GBP/USD)
+    if "/" not in symbol and len(symbol) == 6:
+        symbol = symbol[:3] + "/" + symbol[3:]
 
-    if "values" not in r:
-        return None
+    base_url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": length,
+        "apikey": TWELVEDATA_API_KEY,
+    }
 
-    df = pd.DataFrame(r["values"])
-    df = df.rename(columns={"datetime": "time"})
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-    df = df.iloc[::-1].reset_index(drop=True)  # chronological
-    return df
+    for attempt in range(3):  # Try up to 3 times
+        try:
+            r = requests.get(base_url, params=params, timeout=10)
+            if r.status_code != 200 or not r.text.strip():
+                print(f"⚠️ Empty or bad response for {symbol} (status {r.status_code}), retrying...")
+                time.sleep(2)
+                continue
+
+            data = r.json()
+            if "values" not in data:
+                print(f"⚠️ Invalid response format for {symbol}: {data}")
+                time.sleep(2)
+                continue
+
+            df = pd.DataFrame(data["values"])
+            df = df.astype({
+                "open": "float",
+                "high": "float",
+                "low": "float",
+                "close": "float",
+            })
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            df = df.sort_values("datetime").reset_index(drop=True)
+            return df
+
+        except Exception as e:
+            print(f"❌ Error fetching {symbol} (attempt {attempt+1}/3): {e}")
+            time.sleep(2)
+
+    print(f"🚫 Failed to fetch data for {symbol} after 3 attempts.")
+    return pd.DataFrame()
 
 
 # --- Main Agent ---
